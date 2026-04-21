@@ -43,13 +43,6 @@ func NewScanner(ifaceName string, srcIP net.IP, ouiManager OUIProvider) (*Scanne
 		return nil, fmt.Errorf("failed to open pcap handle: %w", err)
 	}
 
-	// 设置过滤器，只捕获 ARP 数据包
-	filter := "arp"
-	if err := handle.SetBPFFilter(filter); err != nil {
-		handle.Close()
-		return nil, fmt.Errorf("failed to set BPF filter: %w", err)
-	}
-
 	return &Scanner{
 		iface:       iface,
 		srcIP:       srcIP,
