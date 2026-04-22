@@ -17,6 +17,7 @@ func main() {
 	timeout := flag.Int("t", 5, "Scan timeout in seconds")
 	concurrency := flag.Int("c", 50, "Concurrency level for ARP requests")
 	listInterfaces := flag.Bool("l", false, "List all active network interfaces")
+	showOUIInfo := flag.Bool("o", false, "Show OUI cache information")
 	flag.Parse()
 
 	// 列出网络接口
@@ -28,10 +29,20 @@ func main() {
 		return
 	}
 
+	// 显示 OUI 缓存信息
+	if *showOUIInfo {
+		if err := showOUICacheInfo(); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// 检查网络接口参数
 	if *ifaceName == "" {
 		fmt.Println("Error: Network interface is required. Use -i to specify an interface.")
 		fmt.Println("Use -l to list all active network interfaces.")
+		fmt.Println("Use -o to show OUI cache information.")
 		os.Exit(1)
 	}
 
@@ -56,6 +67,30 @@ func listNetworkInterfaces() error {
 		fmt.Printf("  Network: %s\n", iface.Network)
 	}
 
+	return nil
+}
+
+func showOUICacheInfo() error {
+	ouiManager := oui.NewManager()
+	
+	fmt.Println("OUI Cache Information:")
+	fmt.Printf("  Cache Directory: %s\n", ouiManager.GetCacheDir())
+	
+	fmt.Println("\nChecking for updates...")
+	cacheInfo, err := ouiManager.CheckCache()
+	if err != nil {
+		return fmt.Errorf("failed to check cache: %w", err)
+	}
+	
+	fmt.Printf("  Remote Last-Modified: %s\n", cacheInfo.LastModified.Format(time.RFC1123))
+	fmt.Printf("  Expected File Name: %s\n", cacheInfo.FileName)
+	
+	if cacheInfo.NeedsUpdate {
+		fmt.Println("  Status: Update available")
+	} else {
+		fmt.Println("  Status: Local cache is up to date")
+	}
+	
 	return nil
 }
 
@@ -84,13 +119,21 @@ func runScan(ifaceName string, timeoutSec, concurrency int) error {
 	fmt.Printf("  IP Address: %s\n", targetIface.IPAddr)
 	fmt.Printf("  Network: %s\n", targetIface.Network)
 
-	// 下载 OUI 数据库
-	fmt.Println("\nDownloading OUI database from IEEE...")
+	// 加载 OUI 数据库
+	fmt.Println()
 	ouiManager := oui.NewManager()
 	if err := ouiManager.Download(); err != nil {
-		return fmt.Errorf("failed to download OUI database: %w", err)
+		return fmt.Errorf("failed to load OUI database: %w", err)
 	}
-	fmt.Printf("Downloaded %d OUI entries\n", ouiManager.Count())
+	
+	fmt.Println()
+	fmt.Println("OUI Database Information:")
+	fmt.Printf("  Cache Directory: %s\n", ouiManager.GetCacheDir())
+	fmt.Printf("  Current File: %s\n", ouiManager.GetCurrentFile())
+	if !ouiManager.GetLastModified().IsZero() {
+		fmt.Printf("  Last Modified: %s\n", ouiManager.GetLastModified().Format(time.RFC1123))
+	}
+	fmt.Printf("  Total OUI Entries: %d\n", ouiManager.Count())
 
 	// 生成目标 IP 列表
 	fmt.Println("\nGenerating target IP list...")
