@@ -2,6 +2,14 @@ module github.com/yourname/oui-tracker
 
 go 1.26.2
 
-require github.com/google/gopacket v1.1.19
+require (
+	github.com/google/gopacket v1.1.19
+	github.com/schollz/progressbar/v3 v3.14.6
+)
 
-require golang.org/x/sys v0.0.0-20190412213103-97732733099d // indirect
+require (
+	github.com/mitchellh/colorstring v0.0.0-20190213212951-d06e56a500db // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+	golang.org/x/sys v0.22.0 // indirect
+	golang.org/x/term v0.22.0 // indirect
+)
