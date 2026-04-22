@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,22 +17,24 @@ import (
 )
 
 const (
-	OUIURL       = "https://standards-oui.ieee.org/oui/oui.txt"
-	CacheDirName = ".oui_cache"
-	LastModFile  = "last_modified.txt"
+	OUIURL         = "https://standards-oui.ieee.org/oui/oui.txt"
+	CacheDirName   = ".oui_cache"
+	LastModFile    = "last_modified.txt"
+	DefaultOUIKB   = 8 * 1024 * 1024 // 默认 8MB
 )
 
 type Manager struct {
-	ouiMap        map[string]string
-	mu            sync.RWMutex
-	cacheDir      string
-	lastModified  time.Time
-	currentFile   string
+	ouiMap       map[string]string
+	mu           sync.RWMutex
+	cacheDir     string
+	lastModified time.Time
+	currentFile  string
 }
 
 type CacheInfo struct {
 	LastModified time.Time
 	FileName     string
+	ContentLength int64
 	NeedsUpdate  bool
 }
 
@@ -56,10 +59,10 @@ func (m *Manager) setCommonHeaders(req *http.Request) {
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 }
 
-func (m *Manager) checkRemoteLastModified() (time.Time, error) {
+func (m *Manager) checkRemoteLastModified() (time.Time, int64, error) {
 	req, err := http.NewRequest("HEAD", OUIURL, nil)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to create HEAD request: %w", err)
+		return time.Time{}, 0, fmt.Errorf("failed to create HEAD request: %w", err)
 	}
 	
 	m.setCommonHeaders(req)
@@ -70,65 +73,82 @@ func (m *Manager) checkRemoteLastModified() (time.Time, error) {
 	
 	resp, err := client.Do(req)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("HEAD request failed: %w", err)
+		return time.Time{}, 0, fmt.Errorf("HEAD request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotModified {
-		return time.Time{}, fmt.Errorf("HEAD request returned status: %d", resp.StatusCode)
+		return time.Time{}, 0, fmt.Errorf("HEAD request returned status: %d", resp.StatusCode)
 	}
 	
 	lastModStr := resp.Header.Get("Last-Modified")
 	if lastModStr == "" {
-		return time.Time{}, fmt.Errorf("no Last-Modified header in response")
+		return time.Time{}, 0, fmt.Errorf("no Last-Modified header in response")
 	}
 	
 	lastMod, err := http.ParseTime(lastModStr)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("failed to parse Last-Modified: %w", err)
+		return time.Time{}, 0, fmt.Errorf("failed to parse Last-Modified: %w", err)
 	}
 	
-	return lastMod, nil
+	contentLength := resp.ContentLength
+	if contentLength <= 0 {
+		clStr := resp.Header.Get("Content-Length")
+		if clStr != "" {
+			if cl, err := strconv.ParseInt(clStr, 10, 64); err == nil {
+				contentLength = cl
+			}
+		}
+	}
+	
+	return lastMod, contentLength, nil
 }
 
-func (m *Manager) getLocalLastModified() (time.Time, string, error) {
+func (m *Manager) getLocalLastModified() (time.Time, string, int64, error) {
 	lastModFile := filepath.Join(m.cacheDir, LastModFile)
 	
 	data, err := os.ReadFile(lastModFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return time.Time{}, "", nil
+			return time.Time{}, "", 0, nil
 		}
-		return time.Time{}, "", fmt.Errorf("failed to read last_modified.txt: %w", err)
+		return time.Time{}, "", 0, fmt.Errorf("failed to read last_modified.txt: %w", err)
 	}
 	
-	lines := strings.SplitN(strings.TrimSpace(string(data)), "|", 2)
+	lines := strings.SplitN(strings.TrimSpace(string(data)), "|", 3)
 	if len(lines) < 1 {
-		return time.Time{}, "", fmt.Errorf("invalid last_modified.txt format")
+		return time.Time{}, "", 0, fmt.Errorf("invalid last_modified.txt format")
 	}
 	
 	lastMod, err := time.Parse(time.RFC1123, lines[0])
 	if err != nil {
-		return time.Time{}, "", fmt.Errorf("failed to parse local last_modified: %w", err)
+		return time.Time{}, "", 0, fmt.Errorf("failed to parse local last_modified: %w", err)
 	}
 	
 	var fileName string
-	if len(lines) == 2 {
+	if len(lines) >= 2 && lines[1] != "" {
 		fileName = lines[1]
 	} else {
 		fileName = fmt.Sprintf("oui_%s.txt", lastMod.Format("20060102_150405"))
 	}
 	
-	return lastMod, fileName, nil
+	var contentLength int64
+	if len(lines) >= 3 && lines[2] != "" {
+		if cl, err := strconv.ParseInt(lines[2], 10, 64); err == nil {
+			contentLength = cl
+		}
+	}
+	
+	return lastMod, fileName, contentLength, nil
 }
 
-func (m *Manager) saveLocalLastModified(lastMod time.Time, fileName string) error {
+func (m *Manager) saveLocalLastModified(lastMod time.Time, fileName string, contentLength int64) error {
 	if err := os.MkdirAll(m.cacheDir, 0755); err != nil {
 		return fmt.Errorf("failed to create cache directory: %w", err)
 	}
 	
 	lastModFile := filepath.Join(m.cacheDir, LastModFile)
-	content := fmt.Sprintf("%s|%s", lastMod.Format(time.RFC1123), fileName)
+	content := fmt.Sprintf("%s|%s|%d", lastMod.Format(time.RFC1123), fileName, contentLength)
 	
 	if err := os.WriteFile(lastModFile, []byte(content), 0644); err != nil {
 		return fmt.Errorf("failed to write last_modified.txt: %w", err)
@@ -142,12 +162,12 @@ func (m *Manager) generateFileName(lastMod time.Time) string {
 }
 
 func (m *Manager) CheckCache() (*CacheInfo, error) {
-	localLastMod, localFileName, err := m.getLocalLastModified()
+	localLastMod, localFileName, localContentLength, err := m.getLocalLastModified()
 	if err != nil {
 		return nil, err
 	}
 	
-	remoteLastMod, err := m.checkRemoteLastModified()
+	remoteLastMod, remoteContentLength, err := m.checkRemoteLastModified()
 	if err != nil {
 		if localLastMod.IsZero() {
 			return nil, err
@@ -156,6 +176,7 @@ func (m *Manager) CheckCache() (*CacheInfo, error) {
 		return &CacheInfo{
 			LastModified: localLastMod,
 			FileName:     localFileName,
+			ContentLength: localContentLength,
 			NeedsUpdate:  false,
 		}, nil
 	}
@@ -174,14 +195,20 @@ func (m *Manager) CheckCache() (*CacheInfo, error) {
 		fileName = localFileName
 	}
 	
+	contentLength := remoteContentLength
+	if contentLength <= 0 {
+		contentLength = localContentLength
+	}
+	
 	return &CacheInfo{
 		LastModified: remoteLastMod,
 		FileName:     fileName,
+		ContentLength: contentLength,
 		NeedsUpdate:  needsUpdate,
 	}, nil
 }
 
-func (m *Manager) downloadWithProgress(filePath string) error {
+func (m *Manager) downloadWithProgress(filePath string, expectedContentLength int64) error {
 	req, err := http.NewRequest("GET", OUIURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create GET request: %w", err)
@@ -212,6 +239,10 @@ func (m *Manager) downloadWithProgress(filePath string) error {
 	defer outFile.Close()
 	
 	contentLength := resp.ContentLength
+	if contentLength <= 0 {
+		contentLength = expectedContentLength
+	}
+	
 	var writer io.Writer
 	
 	if contentLength > 0 {
@@ -221,11 +252,14 @@ func (m *Manager) downloadWithProgress(filePath string) error {
 		)
 		writer = io.MultiWriter(outFile, bar)
 	} else {
-		fmt.Println("Downloading OUI database (unknown size)...")
-		writer = outFile
+		bar := progressbar.DefaultBytes(
+			DefaultOUIKB,
+			"Downloading OUI database (approximate)",
+		)
+		writer = io.MultiWriter(outFile, bar)
 	}
 	
-	_, err = io.Copy(writer, resp.Body)
+	written, err := io.Copy(writer, resp.Body)
 	if err != nil {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to download file: %w", err)
@@ -241,7 +275,22 @@ func (m *Manager) downloadWithProgress(filePath string) error {
 		return fmt.Errorf("failed to rename temp file: %w", err)
 	}
 	
+	actualSize, err := getFileSize(filePath)
+	if err == nil && actualSize > 0 {
+		expectedContentLength = actualSize
+	} else if written > 0 {
+		expectedContentLength = written
+	}
+	
 	return nil
+}
+
+func getFileSize(filePath string) (int64, error) {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }
 
 func (m *Manager) parseFile(filePath string) error {
@@ -315,9 +364,11 @@ func (m *Manager) Download() error {
 	
 	fmt.Printf("File will be saved as: %s\n", cacheInfo.FileName)
 	
-	if err := m.downloadWithProgress(filePath); err != nil {
+	if err := m.downloadWithProgress(filePath, cacheInfo.ContentLength); err != nil {
 		return err
 	}
+	
+	actualSize, _ := getFileSize(filePath)
 	
 	fmt.Println("\nParsing OUI database...")
 	
@@ -325,7 +376,7 @@ func (m *Manager) Download() error {
 		return err
 	}
 	
-	if err := m.saveLocalLastModified(cacheInfo.LastModified, cacheInfo.FileName); err != nil {
+	if err := m.saveLocalLastModified(cacheInfo.LastModified, cacheInfo.FileName, actualSize); err != nil {
 		fmt.Printf("Warning: Failed to save cache info: %v\n", err)
 	}
 	
